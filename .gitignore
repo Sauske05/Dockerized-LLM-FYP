@@ -1,2 +1,4 @@
-chatllm/model/
-recommendation_llm/model/
+chatllm/chat_model/
+chatllm/recommendation_model
+chatllm/bert_model
+redis_test
