@@ -1,15 +1,21 @@
-from fastapi  import FastAPI, Body
+from fastapi  import FastAPI, Body, WebSocket
 from typing import Annotated
 from contextlib import asynccontextmanager
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, TextStreamer
 import torch
 import uvicorn
 from pydantic import BaseModel
 from bert_model.configure import *
 from bert_model.tokenizer import *
 from bert_model.model import *
+from concurrent.futures import ThreadPoolExecutor
 
+from fastapi.responses import StreamingResponse
+import asyncio
+import redis
 
+#redis = redis_client.from_url('redis://localhost', decode_responses = True)
+r = redis.Redis(host = 'localhost', port=6379, db=0)
 # Load model at startup
 def load_model(model_dir):
     device_map = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -70,11 +76,36 @@ async def lifespan(app:FastAPI):
 app = FastAPI(title = 'Chatbot API', lifespan=lifespan)
 
 
-def generation(prompt, model, tokenizer, device):
+# async def generation(prompt, model, tokenizer, device):
+#     streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens = True)
+#     inputs = tokenizer(prompt, return_tensors='pt').to(device)
+#     attention_mask = inputs["attention_mask"]
+#     with torch.no_grad():
+#         model.generate(
+#             inputs['input_ids'],
+#             max_length=500,
+#             no_repeat_ngram_size=1,
+#             top_k=5,
+#             temperature=0.7,
+#             eos_token_id=tokenizer.eos_token_id,
+#             pad_token_id=tokenizer.pad_token_id,
+#             attention_mask=attention_mask,
+#             top_p=0.95,
+#             use_cache=True,
+#             streamer = streamer
+
+#         )
+
+#     # generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+#     # return generated_text
+#     for chunk in streamer.text.split():
+#         yield chunk + " "
+
+async def generation(prompt, model, tokenizer, device):
     inputs = tokenizer(prompt, return_tensors='pt').to(device)
     attention_mask = inputs["attention_mask"]
     with torch.no_grad():
-        outputs = model.generate(
+        output_ids = model.generate(
             inputs['input_ids'],
             max_length=500,
             no_repeat_ngram_size=1,
@@ -84,28 +115,42 @@ def generation(prompt, model, tokenizer, device):
             pad_token_id=tokenizer.pad_token_id,
             attention_mask=attention_mask,
             top_p=0.95,
-            use_cache=True
-
+            use_cache=True,
+            output_scores=True,
+            return_dict_in_generate=True
         )
 
-    generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    return generated_text
-# def format_text(user_tex):
-#     prompt = f"""
-#     You are a helpful mental health assistnat. Provide supportive answers.
-#     """
-#     return prompt
+        generated_ids = output_ids.sequences  # Extract generated token IDs
+        response_text = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+    print(response_text)
+    return response_text 
+
+        
+
+
+# async def generate_streaming_response(prompt: str):
+#     async for chunk in generation_streaming(prompt, app.state.chat_model, app.state.chat_tokenizer, "cuda"):
+#         chunk = chunk.strip()  # Remove spaces or newlines
+#         if not chunk:  # Skip empty tokens
+#             continue
+        
+#         # print(f"Pushing to Redis: {chunk}")  # Debugging print
+#         # try:
+#         #     await r.publish('my_channel', chunk)
+#         # except r.ConnectionError as e:
+#         #     print(f"Redis Connection Error: {e}")  # Handle Redis errors
+        
+#         yield chunk 
+#     #return 'Redis Streaming'
+#         #yield chunk
+
 
 class QueryRequest(BaseModel):
     prompt: str
 @app.post('/chatbot')
-async def response(user_query: QueryRequest):
-    prompt = user_query.prompt
-    #model, tokenizer = load_model()
-    model = app.state.chat_model
-    tokenizer = app.state.chat_tokenizer
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    response = generation(prompt, model,tokenizer, device)
+async def response(request_body: QueryRequest):
+    print(f'This is the request body : {request_body}')
+    response = await generation(request_body.prompt, app.state.chat_model,app.state.chat_tokenizer, 'cuda')
     return response
 
 class SentimentModelPydantic(BaseModel):
@@ -131,8 +176,8 @@ async def bert_recommendation(sentiment_obj: SentimentModelPydantic):
     model = app.state.recomm_model
     tokenizer = app.state.recomm_tokenizer
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    response = generation(prompt, model, tokenizer, device)
-    return response
+    #response = generate_streaming(prompt, model, tokenizer, device)
+    #return response
 
 if __name__ == "__main__":
     uvicorn.run('inference:app', host="0.0.0.0", port=8080, reload=True)
