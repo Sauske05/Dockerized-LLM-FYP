@@ -1,5 +1,6 @@
+import asyncio
 from fastapi  import FastAPI, Body, WebSocket
-from typing import Annotated
+from typing import Annotated, AsyncGenerator, Iterator
 from contextlib import asynccontextmanager
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, TextStreamer
 import torch
@@ -8,15 +9,21 @@ from pydantic import BaseModel
 from bert_model.configure import *
 from bert_model.tokenizer import *
 from bert_model.model import *
-from concurrent.futures import ThreadPoolExecutor
-
 from fastapi.responses import StreamingResponse
-import asyncio
-import redis
+from llama_cpp import Llama
 
 #redis = redis_client.from_url('redis://localhost', decode_responses = True)
-r = redis.Redis(host = 'localhost', port=6379, db=0)
+#r = redis.Redis(host = 'localhost', port=6379, db=0)
+local_model_dir = "./Qwen_gguf/deepseek-r1-distill-qwen-1.5b-q4_0.gguf"
 # Load model at startup
+# Initialize the model
+recommendation_llm = Llama(
+    model_path=local_model_dir,
+    n_ctx=2048,  # Context window size
+    n_threads=4  # Number of CPU threads to use
+    #n_gpu_layers=-1
+)
+
 def load_model(model_dir):
     device_map = 'cuda' if torch.cuda.is_available() else 'cpu'
     
@@ -64,9 +71,8 @@ async def lifespan(app:FastAPI):
     app.state.chat_model = chat_model
     app.state.chat_tokenizer = chat_tokenizer
     print('Chat Model Loaded Successfully!')
-    recomm_model, recomm_tokenizer = load_model('./recommendation_model')
-    app.state.recomm_model = recomm_model
-    app.state.recomm_tokenizer = recomm_tokenizer
+    #recomm_model = recommendation_llm
+    app.state.recomm_model = recommendation_llm
     print('Recommendation Model Loaded Successfully!')
     bert_model = load_bert()
     app.state.bert_model = bert_model
@@ -100,10 +106,9 @@ async def generation(prompt, model, tokenizer, device):
     print(response_text)
     return response_text 
 
-        
-
 class QueryRequest(BaseModel):
     prompt: str
+
 @app.post('/chatbot')
 async def response(request_body: QueryRequest):
     print(f'This is the request body : {request_body}')
@@ -111,8 +116,11 @@ async def response(request_body: QueryRequest):
     return response
 
 class SentimentModelPydantic(BaseModel):
-    sentiment_keyword:str
-    user_text:str
+    prompt: str
+    max_tokens: int = 256
+    temperature: float = 0.7
+    top_p: float = 0.95
+    stop: list = []
 
 class SentimentUserText(BaseModel):
     user_text:str
@@ -136,22 +144,31 @@ async def bert_sentiment_analysis(text_obj:SentimentUserText):
     
     #return sentiment
 @app.post('/recommendation_analysis')
-async def bert_recommendation(sentiment_obj: SentimentModelPydantic):
-    user_text = sentiment_obj.user_text if sentiment_obj.user_text is not None else ''
-    print(f'This is the user_text: {user_text}')
-    #sentiment = await bert_inference(user_text, app.state.bert_model)
-    sentiment = sentiment_obj.sentiment_keyword
-    print(f'This is the user sentiment: {sentiment}')
-    #sentiment = await bert_recommendation(sentiment_obj.user_text)
-    prompt = await sentiment_format_text(user_text, sentiment)
-    model = app.state.recomm_model
-    tokenizer = app.state.recomm_tokenizer
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    response = await generation(prompt, model,tokenizer, device)
-    return {
-        'response' : response,
-        'sentiment': sentiment
-    }
+async def bert_recommendation(request: SentimentModelPydantic):
+    async def token_generator() -> AsyncGenerator[str, None]:
+        def sync_generator() -> Iterator[str]:
+            response = app.state.recomm_model(
+                prompt = request.prompt,
+                max_tokens=request.max_tokens,
+                temperature=request.temperature,
+                top_p=request.top_p,
+                stop=request.stop,
+                stream=True
+            )
+            for chunk in response:
+                if "choices" in chunk and len(chunk["choices"]) > 0:
+                    token = chunk["choices"][0]["text"]
+                    yield token
+        
+        # Convert sync generator to async generator
+        for token in sync_generator():
+            yield token
+            # Small delay to prevent overwhelming the client
+            await asyncio.sleep(0.01)
+
+    return StreamingResponse(token_generator(), media_type="text/plain")
+
+    
     
 
 if __name__ == "__main__":
