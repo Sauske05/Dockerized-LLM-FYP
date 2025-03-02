@@ -12,38 +12,22 @@ from bert_model.model import *
 from fastapi.responses import StreamingResponse
 from llama_cpp import Llama
 
-#redis = redis_client.from_url('redis://localhost', decode_responses = True)
-#r = redis.Redis(host = 'localhost', port=6379, db=0)
-local_model_dir = "./Qwen_gguf/deepseek-r1-distill-qwen-1.5b-q4_0.gguf"
-# Load model at startup
+recommendation_local_model_dir = "./Qwen_gguf/deepseek-r1-distill-qwen-1.5b-q4_0.gguf"
+chat_local_model_dir = "./chat_model/llama-3.2_4bit.gguf"
+
 # Initialize the model
-recommendation_llm = Llama(
-    model_path=local_model_dir,
+chat_lllm = Llama(
+    model_path=recommendation_local_model_dir,
     n_ctx=2048,  # Context window size
     n_threads=4  # Number of CPU threads to use
     #n_gpu_layers=-1
 )
-
-def load_model(model_dir):
-    device_map = 'cuda' if torch.cuda.is_available() else 'cpu'
-    
-    #BitsandBytes Config
-    use_4bit = True
-    bnb_4bit_compute_dtype = 'float16'
-    compute_dtype = getattr(torch, bnb_4bit_compute_dtype)
-    bnb_4bit_quant_type = 'nf4'
-    use_double_nested_quant = False
-    bnb_config = BitsAndBytesConfig(
-    load_in_4bit=use_4bit,
-    bnb_4bit_use_double_quant=use_double_nested_quant,
-    bnb_4bit_quant_type=bnb_4bit_quant_type,
-    bnb_4bit_compute_dtype=compute_dtype
+recommendation_llm = Llama(
+    model_path=recommendation_local_model_dir,
+    n_ctx=2048,  # Context window size
+    n_threads=4  # Number of CPU threads to use
+    #n_gpu_layers=-1
 )
-    #model = AutoModelForCausalLM()
-    model = AutoModelForCausalLM.from_pretrained(model_dir, quantization_config=bnb_config, use_cache = False, device_map=device_map)
-    tokenizer = AutoTokenizer.from_pretrained(model_dir)
-    return model, tokenizer
-
 
 def load_bert():
     model = SentimentModel(config()['h'], config()['d_model'], config()['d_ff'], config()['labels'])
@@ -67,19 +51,19 @@ async def bert_inference(input_text, bert_model):
         return  label_dict[model_idx]
 @asynccontextmanager
 async def lifespan(app:FastAPI):
-    chat_model, chat_tokenizer = load_model('./chat_model')
-    app.state.chat_model = chat_model
-    app.state.chat_tokenizer = chat_tokenizer
+    #chat_model, chat_tokenizer = load_model('./chat_model')
+    app.state.chat_model = chat_lllm
+    #app.state.chat_tokenizer = chat_tokenizer
     print('Chat Model Loaded Successfully!')
     #recomm_model = recommendation_llm
-    app.state.recomm_model = recommendation_llm
+    #app.state.recomm_model = recommendation_llm
     print('Recommendation Model Loaded Successfully!')
     bert_model = load_bert()
     app.state.bert_model = bert_model
 
     yield
 
-app = FastAPI(title = 'Chatbot API', lifespan=lifespan)
+app = FastAPI(title = 'LLM Services', lifespan=lifespan)
 
 
 async def generation(prompt, model, tokenizer, device):
@@ -108,12 +92,38 @@ async def generation(prompt, model, tokenizer, device):
 
 class QueryRequest(BaseModel):
     prompt: str
+    max_tokens: int = 256
+    temperature: float = 0.7
+    top_p: float = 0.95
+    stop: list = []
 
 @app.post('/chatbot')
-async def response(request_body: QueryRequest):
-    print(f'This is the request body : {request_body}')
-    response = await generation(request_body.prompt, app.state.chat_model,app.state.chat_tokenizer, 'cuda')
-    return response
+async def response(request: QueryRequest):
+    # print(f'This is the request body : {request_body}')
+    # response = await generation(request_body.prompt, app.state.chat_model,app.state.chat_tokenizer, 'cuda')
+    # return response
+    async def token_generator() -> AsyncGenerator[str, None]:
+        def sync_generator() -> Iterator[str]:
+            response = app.state.chat_model(
+                prompt = request.prompt,
+                max_tokens=request.max_tokens,
+                temperature=request.temperature,
+                top_p=request.top_p,
+                stop=request.stop,
+                stream=True
+            )
+            for chunk in response:
+                if "choices" in chunk and len(chunk["choices"]) > 0:
+                    token = chunk["choices"][0]["text"]
+                    yield token
+        
+        # Convert sync generator to async generator
+        for token in sync_generator():
+            yield token
+            # Small delay to prevent overwhelming the client
+            await asyncio.sleep(0.01)
+
+    return StreamingResponse(token_generator(), media_type="text/plain")
 
 class SentimentModelPydantic(BaseModel):
     prompt: str
