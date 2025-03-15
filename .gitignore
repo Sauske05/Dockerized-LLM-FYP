@@ -3,3 +3,5 @@ chatllm/recommendation_model
 chatllm/bert_model
 redis_test
 Qwen_gguf
+preprocessed_finetuning_conversation_data.csv
+train_data.parquet

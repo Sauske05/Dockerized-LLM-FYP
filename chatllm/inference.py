@@ -55,11 +55,11 @@ async def lifespan(app:FastAPI):
     app.state.chat_model = chat_lllm
     #app.state.chat_tokenizer = chat_tokenizer
     print('Chat Model Loaded Successfully!')
-    #recomm_model = recommendation_llm
-    #app.state.recomm_model = recommendation_llm
+    recomm_model = recommendation_llm
+    app.state.recomm_model = recommendation_llm
     print('Recommendation Model Loaded Successfully!')
-    bert_model = load_bert()
-    app.state.bert_model = bert_model
+    #bert_model = load_bert()
+    #app.state.bert_model = bert_model
 
     yield
 
@@ -182,4 +182,4 @@ async def bert_recommendation(request: SentimentModelPydantic):
     
 
 if __name__ == "__main__":
-    uvicorn.run('inference:app', host="0.0.0.0", port=8080, reload=True) #reload = True
+    uvicorn.run('inference:app', host="0.0.0.0", port=2001, reload=True) #reload = True
