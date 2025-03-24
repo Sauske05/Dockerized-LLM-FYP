@@ -1,7 +1,8 @@
 import asyncio
-from fastapi  import FastAPI, Body, WebSocket
+from fastapi  import FastAPI, Body, HTTPException, WebSocket
 from typing import Annotated, AsyncGenerator, Iterator
 from contextlib import asynccontextmanager
+import httpx
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, TextStreamer
 import torch
 import uvicorn
@@ -11,23 +12,55 @@ from bert_model.tokenizer import *
 from bert_model.model import *
 from fastapi.responses import StreamingResponse
 from llama_cpp import Llama
+from fastapi import FastAPI, Request, Depends
+from langchain_community.llms import LlamaCpp
+from langchain_core.prompts import PromptTemplate
+from langchain_community.vectorstores import FAISS
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_core.output_parsers import StrOutputParser
+import mysql.connector
+from mysql.connector import Error
+import numpy as np
 
+
+from sqlalchemy import Text, create_engine, Column, Integer, String
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.sql import select
 recommendation_local_model_dir = "./Qwen_gguf/deepseek-r1-distill-qwen-1.5b-q4_0.gguf"
-chat_local_model_dir = "./chat_model/llama-3.2_4bit.gguf"
-
+#chat_local_model_dir = "./chat_model/llama-3.2_4bit.gguf"
+chat_local_model_dir = "./chat_model/Llama-3.2-3B-Instruct-IQ3_M.gguf"
 # Initialize the model
-chat_lllm = Llama(
-    model_path=recommendation_local_model_dir,
-    n_ctx=2048,  # Context window size
-    n_threads=4  # Number of CPU threads to use
-    #n_gpu_layers=-1
-)
+# chat_lllm = Llama(
+#     model_path=recommendation_local_model_dir,
+#     n_ctx=2048,  # Context window size
+#     n_threads=4  # Number of CPU threads to use
+#     #n_gpu_layers=-1
+# )
+
+chat_llm = LlamaCpp(model_path = chat_local_model_dir,
+                    n_ctx = 4096)
+embedding_model = HuggingFaceEmbeddings(model_name = 'sentence-transformers/all-MiniLM-L6-v2')
+
+template = """
+<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+You are a helpful chatbot. Use the following relevant past conversation to respond:
+{context}
+<|eot_id|><|start_header_id|>user<|end_header_id|>
+{input}
+<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+"""
+prompt = PromptTemplate(input_variables=["context", "input"], template=template)
+
+user_vector_stores = {}
+
 recommendation_llm = Llama(
     model_path=recommendation_local_model_dir,
     n_ctx=2048,  # Context window size
     n_threads=4  # Number of CPU threads to use
     #n_gpu_layers=-1
 )
+
 
 def load_bert():
     model = SentimentModel(config()['h'], config()['d_model'], config()['d_ff'], config()['labels'])
@@ -52,7 +85,7 @@ async def bert_inference(input_text, bert_model):
 @asynccontextmanager
 async def lifespan(app:FastAPI):
     #chat_model, chat_tokenizer = load_model('./chat_model')
-    app.state.chat_model = chat_lllm
+    app.state.chat_model = chat_llm
     #app.state.chat_tokenizer = chat_tokenizer
     print('Chat Model Loaded Successfully!')
     recomm_model = recommendation_llm
@@ -96,35 +129,136 @@ class QueryRequest(BaseModel):
     temperature: float = 0.7
     top_p: float = 0.95
     stop: list = []
+    user_id:str
+
+# @app.post('/chatbot')
+# async def response(request: QueryRequest):
+#     # print(f'This is the request body : {request_body}')
+#     # response = await generation(request_body.prompt, app.state.chat_model,app.state.chat_tokenizer, 'cuda')
+#     # return response
+#     if request.user_id not in user_vector_stores:
+#         user_vector_stores[request.user_id] = FAISS.from_texts(
+#         ['Initial Empty Context'], embedding_model
+#         )
+
+#     vector_store = user_vector_stores[request.user_id]
+#     docs = vector_store.similarity_search(request.prompt, k = 3)
+
+#     context = '\n'.join([doc.page_content for doc in docs])
+#     async def token_generator() -> AsyncGenerator[str, None]:
+#         def sync_generator() -> Iterator[str]:
+#             response = app.state.chat_model(
+#                 prompt = request.prompt,
+#                 max_tokens=request.max_tokens,
+#                 temperature=request.temperature,
+#                 top_p=request.top_p,
+#                 stop=request.stop,
+#                 stream=True
+#             )
+#             for chunk in response:
+#                 if "choices" in chunk and len(chunk["choices"]) > 0:
+#                     token = chunk["choices"][0]["text"]
+#                     yield token
+        
+#         # Convert sync generator to async generator
+#         for token in sync_generator():
+#             yield token
+#             # Small delay to prevent overwhelming the client
+#             await asyncio.sleep(0.01)
+
+#     return StreamingResponse(token_generator(), media_type="text/plain")
+
+# Database configuration
+DATABASE_URL = "mysql+pymysql://root:@localhost/mentalSathi"
+engine = create_engine(DATABASE_URL, echo=True)  # echo=True for SQL query logging
+
+# Session factory
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# Base class for models
+Base = declarative_base()
+
+# Define the ChatbotChat model
+class ChatbotChat(Base):
+    __tablename__ = "chatbot_chat"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(String(255), index=True)
+    context = Column(Text)
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+@app.get("/chats/{chat_id}/message/")
+async def get_specific_message(
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    try:
+        stmt = select(ChatbotChat.context).where(
+            (ChatbotChat.user_id == request.user_id)
+        )
+        result = db.execute(stmt).scalar_one_or_none()  # single value or None
+        if result:
+            print(f'This is the result : {result}')
+            return {"message": result}
+        return {"error": "Message not found"}
+    except Exception as e:
+        return {"error": str(e)} 
+    
 
 @app.post('/chatbot')
 async def response(request: QueryRequest):
-    # print(f'This is the request body : {request_body}')
-    # response = await generation(request_body.prompt, app.state.chat_model,app.state.chat_tokenizer, 'cuda')
-    # return response
-    async def token_generator() -> AsyncGenerator[str, None]:
-        def sync_generator() -> Iterator[str]:
-            response = app.state.chat_model(
-                prompt = request.prompt,
-                max_tokens=request.max_tokens,
-                temperature=request.temperature,
-                top_p=request.top_p,
-                stop=request.stop,
-                stream=True
-            )
-            for chunk in response:
-                if "choices" in chunk and len(chunk["choices"]) > 0:
-                    token = chunk["choices"][0]["text"]
-                    yield token
-        
-        # Convert sync generator to async generator
-        for token in sync_generator():
-            yield token
-            # Small delay to prevent overwhelming the client
-            await asyncio.sleep(0.01)
+    print('Reaches Here')
+    vector_store = FAISS.from_texts([''], embedding_model)
+    # Fetch the specific message from the /chats/{chat_id}/message/ endpoint
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"http://localhost:8000/chats/{request.user_id}/message/",
+            params={"user_id" : request.user_id}  # Pass user_id if needed
+        )
+        if response.status_code != 200:
+            raise HTTPException(status_code=response.status_code, detail="Failed to fetch message")
+        message_data = response.json()
+        if "error" in message_data:
+            raise HTTPException(status_code=404, detail=message_data["error"])
+        previous_message = message_data["message"]
 
-    return StreamingResponse(token_generator(), media_type="text/plain")
+    # Add the fetched message to the vector store
+    vector_store.add_texts([previous_message])
 
+    # Search for relevant documents
+    docs = vector_store.similarity_search(request.prompt, k=2)
+    context = '\n'.join([doc.page_content for doc in docs])
+    print(context)
+
+    # Create LangChain components
+    parser = StrOutputParser()
+    chain = prompt | app.state.chat_model | parser
+
+    # Accumulate the complete response
+    postman_text = ''
+    async for token in chain.astream_events(
+        {
+            'context': context,
+            'input': request.prompt
+        },
+        version='v2',
+        config={
+            'max_tokens': request.max_tokens,
+            'temperature': request.temperature,
+            'top_p': request.top_p,
+        }
+    ):
+        kind = token['event']
+        if kind == 'on_chain_stream':
+            chunk = token['data']['chunk']
+            print(chunk, end='', flush=True)
+            postman_text += chunk
+
+    # Return the complete text
+    return postman_text
 class SentimentModelPydantic(BaseModel):
     prompt: str
     max_tokens: int = 256
