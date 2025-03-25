@@ -192,17 +192,20 @@ def get_db():
         db.close()
 @app.get("/chats/{chat_id}/message/")
 async def get_specific_message(
-    request: Request,
-    db: Session = Depends(get_db)
+    chat_id : str,
 ):
+    print(f'Request of the chat inside :{chat_id}')
+    #print(f'Request of the chat inside :{request.get('user_id')}')
     try:
         stmt = select(ChatbotChat.context).where(
-            (ChatbotChat.user_id == request.user_id)
+            (ChatbotChat.user_id == chat_id)
         )
-        result = db.execute(stmt).scalar_one_or_none()  # single value or None
-        if result:
-            print(f'This is the result : {result}')
-            return {"message": result}
+        session = Session(engine)
+
+        results = [row[0] for row in session.execute(stmt).all()]
+        if results:
+            print(f'This is the result : {results}')
+            return {"message": results}
         return {"error": "Message not found"}
     except Exception as e:
         return {"error": str(e)} 
@@ -210,12 +213,13 @@ async def get_specific_message(
 
 @app.post('/chatbot')
 async def response(request: QueryRequest):
-    print('Reaches Here')
+    #print('Reaches Here')
+    #print(request)
     vector_store = FAISS.from_texts([''], embedding_model)
     # Fetch the specific message from the /chats/{chat_id}/message/ endpoint
     async with httpx.AsyncClient() as client:
         response = await client.get(
-            f"http://localhost:8000/chats/{request.user_id}/message/",
+            f"http://localhost:2001/chats/{request.user_id}/message/",
             params={"user_id" : request.user_id}  # Pass user_id if needed
         )
         if response.status_code != 200:
@@ -226,7 +230,7 @@ async def response(request: QueryRequest):
         previous_message = message_data["message"]
 
     # Add the fetched message to the vector store
-    vector_store.add_texts([previous_message])
+    vector_store.add_texts(previous_message)
 
     # Search for relevant documents
     docs = vector_store.similarity_search(request.prompt, k=2)
@@ -237,28 +241,33 @@ async def response(request: QueryRequest):
     parser = StrOutputParser()
     chain = prompt | app.state.chat_model | parser
 
-    # Accumulate the complete response
-    postman_text = ''
-    async for token in chain.astream_events(
-        {
-            'context': context,
-            'input': request.prompt
-        },
-        version='v2',
-        config={
-            'max_tokens': request.max_tokens,
-            'temperature': request.temperature,
-            'top_p': request.top_p,
-        }
-    ):
-        kind = token['event']
-        if kind == 'on_chain_stream':
-            chunk = token['data']['chunk']
-            print(chunk, end='', flush=True)
-            postman_text += chunk
 
+    postman_text = ''
+    async def token_generator() -> AsyncGenerator[str, None]:
+        async for token in chain.astream_events(
+                {
+                    'context': context,
+                    'input': request.prompt
+                },
+                version='v2',
+                config={
+                    'max_tokens': request.max_tokens,
+                    'temperature': request.temperature,
+                    'top_p': request.top_p,
+                }
+        ):
+            kind = token['event']
+            if kind == 'on_chain_stream':
+                chunk = token['data']['chunk']
+                print(chunk, end='', flush=True)
+                #postman_text += chunk
+                yield chunk
+                await asyncio.sleep(0.01)
+                    
+    #print(postman_text)
+    return StreamingResponse(token_generator(), media_type='text/plain')
     # Return the complete text
-    return postman_text
+    
 class SentimentModelPydantic(BaseModel):
     prompt: str
     max_tokens: int = 256
