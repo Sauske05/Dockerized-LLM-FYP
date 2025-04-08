@@ -27,7 +27,7 @@ from sqlalchemy import Text, create_engine, Column, Integer, String
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.sql import select
-recommendation_local_model_dir = "./Qwen_gguf/deepseek-r1-distill-qwen-1.5b-q4_0.gguf"
+recommendation_local_model_dir = "./chat_model/Llama-3.2-3B-Instruct-IQ3_M.gguf"
 #chat_local_model_dir = "./chat_model/llama-3.2_4bit.gguf"
 chat_local_model_dir = "./chat_model/Llama-3.2-3B-Instruct-IQ3_M.gguf"
 # Initialize the model
@@ -206,15 +206,17 @@ async def get_specific_message(
         if results:
             print(f'This is the result : {results}')
             return {"message": results}
-        return {"error": "Message not found"}
+        return {'message' : ''}
+        #return {"error": "Message not found"}
     except Exception as e:
         return {"error": str(e)} 
     
 
 @app.post('/chatbot')
 async def response(request: QueryRequest):
-    #print('Reaches Here')
-    #print(request)
+    print('Reaches Here')
+    print(request.user_id)
+    print(request.prompt)
     vector_store = FAISS.from_texts([''], embedding_model)
     # Fetch the specific message from the /chats/{chat_id}/message/ endpoint
     async with httpx.AsyncClient() as client:
@@ -228,11 +230,23 @@ async def response(request: QueryRequest):
         if "error" in message_data:
             raise HTTPException(status_code=404, detail=message_data["error"])
         previous_message = message_data["message"]
+    # Ensure previous_message is a flat list of strings
+    if not previous_message:  # Handle empty case
+        previous_message = [""]
+    elif isinstance(previous_message, str):  # Handle single string case
+        previous_message = [previous_message]
+    elif isinstance(previous_message, list):  # Handle list case
+        # Flatten if nested and ensure all elements are strings
+        previous_message = [str(item) for sublist in previous_message if sublist for item in (sublist if isinstance(sublist, list) else [sublist])]
+    else:
+        previous_message = [""]  # Fallback for unexpected types
 
+    print(f'This is the previous message : {previous_message}')
     # Add the fetched message to the vector store
+    print(f'This is the previous message : {previous_message}')
     vector_store.add_texts(previous_message)
 
-    # Search for relevant documents
+    # Search for relevant :ocuments
     docs = vector_store.similarity_search(request.prompt, k=2)
     context = '\n'.join([doc.page_content for doc in docs])
     print(context)
@@ -279,15 +293,29 @@ class SentimentUserText(BaseModel):
     user_text:str
 
 async def sentiment_format_text(user_text, sentiment):
+    # prompt = f"""
+    # The user said: "{user_text}"
+    # The sentiment of the user is: {sentiment}.
+
+    # Based on the user's sentiment, generate 3 personalized recommendations to help the user feel better and stay 
+    # engaged for the day. Focus on activities that are uplifting, calming, or motivating.
+
+    # Recommendations:
+    # """
+
     prompt = f"""
-    The user said: "{user_text}"
-    The sentiment of the user is: {sentiment}.
+<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+You are a helpful chatbot. Use the following relevant past conversation to respond:
+The user said: {user_text}
+The sentiment of the user is: {sentiment}.
+<|eot_id|><|start_header_id|>user<|end_header_id|>
+Based on the user's sentiment, generate 3 personalized recommendations to help the user feel better and stay 
+engaged for the day. Focus on activities that are uplifting, calming, or motivating.
 
-    Based on the user's sentiment, generate 3 personalized recommendations to help the user feel better and stay 
-    engaged for the day. Focus on activities that are uplifting, calming, or motivating.
+Recommendations:
+<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+"""
 
-    Recommendations:
-    """
     return prompt
 
 @app.post('/sentiment_analysis')
