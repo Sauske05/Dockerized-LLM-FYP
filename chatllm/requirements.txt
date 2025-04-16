@@ -3,3 +3,4 @@ accelerate==1.3.0
 fastapi[standard]
 transformers==4.46.3
 triton
+llama-cpp-python

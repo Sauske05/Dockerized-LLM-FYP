@@ -1,25 +1,22 @@
-FROM nvidia/cuda:12.2.2-devel-ubuntu22.04
+FROM python:3.11-slim
 
-# Set the working directory
 WORKDIR /chatllm
 
-# Copy all files into the container
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    libopenblas-dev \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY . /chatllm/
 
-# Install necessary dependencies
-RUN apt-get update && \
-    apt-get install -y \
-    python3-pip
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip
+RUN pip install --no-cache-dir -r requirements.txt
 
-RUN pip3 install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 
-RUN pip3 install torch torchvision torchaudio
+EXPOSE 2001
 
-RUN pip3 uninstall triton -y
-
-RUN pip3 install triton
-# Expose the port FastAPI will run on
-EXPOSE 8080
-
-# Command to run the application
 CMD ["python3", "inference.py"]
