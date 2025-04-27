@@ -4,3 +4,13 @@ fastapi[standard]
 transformers==4.46.3
 triton
 llama-cpp-python
+langchain-community
+httpx
+pydantic
+torch
+uvicorn
+mysql-connector-python
+sqlalchemy
+numpy
+langchain-core
+faiss-cpu  # or faiss-gpu

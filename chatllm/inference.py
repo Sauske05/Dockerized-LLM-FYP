@@ -38,8 +38,7 @@ chat_local_model_dir = "./chat_model/Llama-3.2-3B-Instruct-IQ3_M.gguf"
 #     #n_gpu_layers=-1
 # )
 
-chat_llm = LlamaCpp(model_path = chat_local_model_dir,
-                    n_ctx = 4096)
+#chat_llm = LlamaCpp(model_path = chat_local_model_dir,n_ctx = 4096, n_threads = 4)
 embedding_model = HuggingFaceEmbeddings(model_name = 'sentence-transformers/all-MiniLM-L6-v2')
 
 template = """
@@ -54,12 +53,12 @@ prompt = PromptTemplate(input_variables=["context", "input"], template=template)
 
 user_vector_stores = {}
 
-recommendation_llm = Llama(
-    model_path=recommendation_local_model_dir,
-    n_ctx=2048,  # Context window size
-    n_threads=4  # Number of CPU threads to use
-    #n_gpu_layers=-1
-)
+# recommendation_llm = Llama(
+#     model_path=recommendation_local_model_dir,
+#     n_ctx=2048,  # Context window size
+#     n_threads=4  # Number of CPU threads to use
+#     #n_gpu_layers=-1
+# )
 
 
 def load_bert():
@@ -85,11 +84,12 @@ async def bert_inference(input_text, bert_model):
 @asynccontextmanager
 async def lifespan(app:FastAPI):
     #chat_model, chat_tokenizer = load_model('./chat_model')
-    app.state.chat_model = chat_llm
+    app.state.chat_model =  LlamaCpp(model_path = chat_local_model_dir,
+                    n_ctx = 4096, n_threads = 4)
     #app.state.chat_tokenizer = chat_tokenizer
     print('Chat Model Loaded Successfully!')
-    recomm_model = recommendation_llm
-    app.state.recomm_model = recommendation_llm
+    #recomm_model = recommendation_llm
+    #app.state.recomm_model = recommendation_llm
     print('Recommendation Model Loaded Successfully!')
     #bert_model = load_bert()
     #app.state.bert_model = bert_model
@@ -256,7 +256,6 @@ async def response(request: QueryRequest):
     chain = prompt | app.state.chat_model | parser
 
 
-    postman_text = ''
     async def token_generator() -> AsyncGenerator[str, None]:
         async for token in chain.astream_events(
                 {
@@ -328,7 +327,7 @@ async def bert_sentiment_analysis(text_obj:SentimentUserText):
 async def bert_recommendation(request: SentimentModelPydantic):
     async def token_generator() -> AsyncGenerator[str, None]:
         def sync_generator() -> Iterator[str]:
-            response = app.state.recomm_model(
+            response = app.state.chat_model(
                 prompt = request.prompt,
                 max_tokens=request.max_tokens,
                 temperature=request.temperature,
@@ -353,4 +352,4 @@ async def bert_recommendation(request: SentimentModelPydantic):
     
 
 if __name__ == "__main__":
-    uvicorn.run('inference:app', host="0.0.0.0", port=2001, reload=True) #reload = True
+    uvicorn.run('inference:app', host="0.0.0.0", port=2001, reload = True) 
